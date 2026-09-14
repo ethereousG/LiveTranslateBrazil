@@ -1,164 +1,467 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Live PT -> EN Earbud Interpreter</title>
-  <style>
-    body { font-family: sans-serif; padding: 20px; background: #121212; color: #fff; }
-    button { width: 100%; padding: 18px; font-size: 1.2rem; border-radius: 8px; border: none; font-weight: bold; }
-    .start { background: #00e676; color: #000; }
-    .stop { background: #ff5252; color: #fff; }
-    #log { margin-top: 20px; font-family: monospace; font-size: 0.9rem; white-space: pre-wrap; color: #aaa; }
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Live Interpreter</title>
+<style>
+  :root {
+    --bg: #0f1113;
+    --panel: #171a1d;
+    --line: #2a2f34;
+    --text: #e8eaed;
+    --dim: #9aa2ab;
+    --go: #35d07f;
+    --stop: #ff6b5e;
+    --accent: #7fb0ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 18px calc(24px + env(safe-area-inset-bottom));
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    max-width: 560px;
+    margin-inline: auto;
+  }
+  h1 { font-size: 1.35rem; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--dim); font-size: 0.9rem; margin: 0 0 22px; }
+  label { display: block; font-size: 0.82rem; color: var(--dim); margin-bottom: 6px; }
+  input, select {
+    width: 100%; padding: 12px; margin-bottom: 16px;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel); color: var(--text); font-size: 1rem;
+  }
+  input:focus, select:focus, button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  button {
+    width: 100%; padding: 18px; font-size: 1.1rem; font-weight: 600;
+    border: none; border-radius: 10px; cursor: pointer; color: #08120c;
+    background: var(--go); transition: background .15s;
+  }
+  button.stop { background: var(--stop); color: #1a0704; }
+  button:disabled { opacity: .55; cursor: default; }
+  #status {
+    margin: 18px 0 10px; font-size: 0.9rem; color: var(--dim);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.live { background: var(--go); }
+  .dot.warn { background: #ffbe4d; }
+  .dot.err  { background: var(--stop); }
+  #transcript {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px; min-height: 140px; max-height: 45vh; overflow-y: auto;
+    font-size: 0.92rem;
+  }
+  #transcript .heard { color: var(--dim); }
+  #transcript .said  { color: var(--text); }
+  #transcript p { margin: 0 0 10px; }
+  #transcript .empty { color: var(--dim); }
+  .note { color: var(--dim); font-size: 0.8rem; margin-top: 14px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
 </head>
 <body>
-  <h2>Live Portuguese Interpreter</h2>
-  <button id="toggleBtn" class="start">Start Listening</button>
-  <div id="log">Status: Idle</div>
 
-  <script>
-    const API_KEY = "YOUR_GEMINI_API_KEY";
-    const HOST = "generativelanguage.googleapis.com";
-    const MODEL = "models/gemini-2.0-flash-exp"; // Supports Live Multimodal WebSocket
-    const URI = `wss://${HOST}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${API_KEY}`;
+<h1>Live interpreter</h1>
+<p class="sub">Speech in, translated speech out, through your earbuds.</p>
 
-    let ws = null;
-    let audioCtx = null;
-    let micStream = null;
-    let isRunning = false;
-    const btn = document.getElementById("toggleBtn");
-    const logEl = document.getElementById("log");
+<label for="keyInput">Gemini API key</label>
+<input type="password" id="keyInput" placeholder="AIza…" autocomplete="off" spellcheck="false">
 
-    function log(msg) { logEl.textContent = msg; }
+<div class="row">
+  <div>
+    <label for="targetLang">Translate into</label>
+    <select id="targetLang">
+      <option value="en" selected>English</option>
+      <option value="pt-BR">Portuguese (Brazil)</option>
+      <option value="es">Spanish</option>
+      <option value="fr">French</option>
+      <option value="de">German</option>
+      <option value="it">Italian</option>
+      <option value="ja">Japanese</option>
+      <option value="ko">Korean</option>
+      <option value="zh">Chinese</option>
+    </select>
+  </div>
+  <div>
+    <label for="echoMode">If already in that language</label>
+    <select id="echoMode">
+      <option value="false" selected>Stay silent</option>
+      <option value="true">Repeat it back</option>
+    </select>
+  </div>
+</div>
 
-    btn.onclick = async () => {
-      if (!isRunning) {
-        await startSession();
-      } else {
-        stopSession();
+<button id="toggleBtn">Start listening</button>
+
+<div id="status"><span class="dot" id="dot"></span><span id="statusText">Ready</span></div>
+<div id="transcript"><p class="empty">Transcript will appear here.</p></div>
+
+<p class="note">Source language is detected automatically. Use earbuds — on a speaker the model hears its own output and the session degrades.</p>
+
+<script>
+(() => {
+  "use strict";
+
+  const ENDPOINT = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+  const MODEL = "models/gemini-3.5-live-translate-preview";
+  const IN_RATE = 16000;    // API requires 16 kHz mono PCM16 in
+  const OUT_RATE = 24000;   // API returns 24 kHz mono PCM16 out
+  const CHUNK_MS = 100;     // recommended send cadence
+  const JITTER = 0.08;      // seconds of playback lead-in
+
+  let ws = null;
+  let micCtx = null, playCtx = null, micStream = null, workletNode = null, sink = null;
+  let running = false;      // user intent
+  let sessionReady = false; // setupComplete received
+  let pending = [];         // buffered mic samples at micCtx.sampleRate
+  let framesPerChunk = 0;
+  let playAt = 0;
+  let liveSources = [];
+  let retries = 0;
+  let retryTimer = null;
+  let wakeLock = null;
+  let transcriptionInGenerationConfig = true; // auto-flips if the server rejects it
+
+  const btn = document.getElementById("toggleBtn");
+  const dot = document.getElementById("dot");
+  const statusText = document.getElementById("statusText");
+  const transcript = document.getElementById("transcript");
+  const keyInput = document.getElementById("keyInput");
+  const targetLang = document.getElementById("targetLang");
+  const echoMode = document.getElementById("echoMode");
+
+  try {
+    const saved = localStorage.getItem("gemini_key");
+    if (saved) keyInput.value = saved;
+  } catch (e) { /* storage blocked */ }
+
+  function setStatus(text, kind) {
+    statusText.textContent = text;
+    dot.className = "dot" + (kind ? " " + kind : "");
+  }
+
+  let heardLine = null, saidLine = null;
+  function addTranscript(kind, text) {
+    const empty = transcript.querySelector(".empty");
+    if (empty) empty.remove();
+    let line = kind === "heard" ? heardLine : saidLine;
+    if (!line) {
+      line = document.createElement("p");
+      line.className = kind;
+      transcript.appendChild(line);
+      if (kind === "heard") heardLine = line; else saidLine = line;
+    }
+    line.textContent += text;
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+  function endTranscriptTurn() { heardLine = null; saidLine = null; }
+
+  // ---- encoding helpers -------------------------------------------------
+
+  function toBase64(bytes) {
+    let s = "";
+    const STEP = 0x8000; // chunked: spreading a large array overflows the stack
+    for (let i = 0; i < bytes.length; i += STEP) {
+      s += String.fromCharCode.apply(null, bytes.subarray(i, i + STEP));
+    }
+    return btoa(s);
+  }
+
+  function resample(input, fromRate) {
+    if (fromRate === IN_RATE) return input;
+    const ratio = fromRate / IN_RATE;
+    const out = new Float32Array(Math.round(input.length / ratio));
+    for (let i = 0; i < out.length; i++) {
+      const pos = i * ratio, i0 = Math.floor(pos);
+      const i1 = Math.min(i0 + 1, input.length - 1);
+      const frac = pos - i0;
+      out[i] = input[i0] * (1 - frac) + input[i1] * frac;
+    }
+    return out;
+  }
+
+  function floatToPcm16(float32) {
+    const pcm = new Int16Array(float32.length);
+    for (let i = 0; i < float32.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32[i]));
+      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return new Uint8Array(pcm.buffer);
+  }
+
+  // ---- session ----------------------------------------------------------
+
+  btn.onclick = () => { running ? stop() : start(); };
+
+  async function start() {
+    const apiKey = keyInput.value.trim();
+    if (!apiKey) { setStatus("Enter your API key to start.", "err"); keyInput.focus(); return; }
+    try { localStorage.setItem("gemini_key", apiKey); } catch (e) {}
+
+    btn.disabled = true;
+    setStatus("Requesting microphone…");
+
+    try {
+      await openAudio();
+    } catch (err) {
+      setStatus("Microphone unavailable: " + err.message, "err");
+      btn.disabled = false;
+      return;
+    }
+
+    running = true;
+    retries = 0;
+    holdScreen();
+    btn.textContent = "Stop";
+    btn.className = "stop";
+    btn.disabled = false;
+    connect(apiKey);
+  }
+
+  async function openAudio() {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+
+    micCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: IN_RATE });
+    playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: OUT_RATE });
+    await micCtx.resume();
+    await playCtx.resume();
+    playAt = playCtx.currentTime;
+
+    framesPerChunk = Math.round(micCtx.sampleRate * CHUNK_MS / 1000);
+
+    const workletCode = `
+      class PcmProcessor extends AudioWorkletProcessor {
+        process(inputs) {
+          const ch = inputs[0] && inputs[0][0];
+          if (ch) this.port.postMessage(new Float32Array(ch));
+          return true;
+        }
+      }
+      registerProcessor('pcm-processor', PcmProcessor);
+    `;
+    const url = URL.createObjectURL(new Blob([workletCode], { type: "application/javascript" }));
+    await micCtx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+
+    const source = micCtx.createMediaStreamSource(micStream);
+    workletNode = new AudioWorkletNode(micCtx, "pcm-processor");
+    workletNode.port.onmessage = (e) => bufferMic(e.data);
+
+    // A worklet with no path to the destination is not guaranteed to be pulled,
+    // so route it through a silent gain node.
+    sink = micCtx.createGain();
+    sink.gain.value = 0;
+    source.connect(workletNode);
+    workletNode.connect(sink);
+    sink.connect(micCtx.destination);
+  }
+
+  function bufferMic(frame) {
+    if (!running) return;
+    pending.push(frame);
+    let total = pending.reduce((n, a) => n + a.length, 0);
+    while (total >= framesPerChunk) {
+      const chunk = new Float32Array(framesPerChunk);
+      let filled = 0;
+      while (filled < framesPerChunk) {
+        const head = pending[0];
+        const take = Math.min(head.length, framesPerChunk - filled);
+        chunk.set(head.subarray(0, take), filled);
+        filled += take;
+        if (take === head.length) pending.shift();
+        else pending[0] = head.subarray(take);
+      }
+      total -= framesPerChunk;
+      sendAudio(chunk);
+    }
+  }
+
+  function sendAudio(chunk) {
+    if (!sessionReady || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const pcm = floatToPcm16(resample(chunk, micCtx.sampleRate));
+    ws.send(JSON.stringify({
+      realtimeInput: {
+        audio: { data: toBase64(pcm), mimeType: "audio/pcm;rate=" + IN_RATE }
+      }
+    }));
+  }
+
+  function buildSetup() {
+    const translationConfig = {
+      targetLanguageCode: targetLang.value,
+      echoTargetLanguage: echoMode.value === "true"
+    };
+    const setup = {
+      model: MODEL,
+      generationConfig: { responseModalities: ["AUDIO"], translationConfig }
+    };
+    // The transcription flags are documented in both places depending on the
+    // page; start where the Live Translate guide puts them and fall back.
+    if (transcriptionInGenerationConfig) {
+      setup.generationConfig.inputAudioTranscription = {};
+      setup.generationConfig.outputAudioTranscription = {};
+    } else {
+      setup.inputAudioTranscription = {};
+      setup.outputAudioTranscription = {};
+    }
+    return { setup };
+  }
+
+  function connect(apiKey) {
+    sessionReady = false;
+    pending = [];
+    setStatus("Connecting…");
+
+    ws = new WebSocket(ENDPOINT + "?key=" + encodeURIComponent(apiKey));
+
+    ws.onopen = () => ws.send(JSON.stringify(buildSetup()));
+
+    ws.onmessage = async (event) => {
+      let raw = event.data;
+      if (raw instanceof Blob) raw = await raw.text();
+      let msg;
+      try { msg = JSON.parse(raw); } catch (e) { return; }
+
+      if (msg.setupComplete) {
+        sessionReady = true;
+        retries = 0;
+        setStatus("Listening", "live");
+        return;
+      }
+
+      const sc = msg.serverContent;
+      if (sc) {
+        if (sc.interrupted) flushPlayback();
+        if (sc.inputTranscription?.text) addTranscript("heard", sc.inputTranscription.text);
+        if (sc.outputTranscription?.text) addTranscript("said", sc.outputTranscription.text);
+        // One event can carry several parts — walk all of them.
+        for (const part of sc.modelTurn?.parts || []) {
+          if (part.inlineData?.data) play(part.inlineData.data);
+        }
+        if (sc.turnComplete) endTranscriptTurn();
+      }
+
+      if (msg.goAway) {
+        setStatus("Server is closing the session, reconnecting…", "warn");
       }
     };
 
-    async function startSession() {
-      btn.disabled = true;
-      log("Connecting to Gemini Live...");
+    ws.onerror = () => { /* onclose carries the detail */ };
 
-      ws = new WebSocket(URI);
+    ws.onclose = (e) => {
+      sessionReady = false;
+      if (!running) return;
 
-      ws.onopen = () => {
-        log("Connected. Configuring session...");
-        // 1. Initial Handshake Config
-        const setupMessage = {
-          setup: {
-            model: MODEL,
-            generationConfig: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } }
-              }
-            },
-            systemInstruction: {
-              parts: [{
-                text: "You are a live simultaneous interpreter. " +
-                      "Translate all incoming Portuguese speech into English immediately. " +
-                      "Output only the translated English audio. Never comment, reply, or add conversational remarks."
-              }]
-            }
-          }
-        };
-        ws.send(JSON.stringify(setupMessage));
-        startMicCapture();
-        isRunning = true;
-        btn.textContent = "Stop Interpreter";
-        btn.className = "stop";
-        btn.disabled = false;
-        log("Listening to surrounding Portuguese...");
-      };
+      const reason = (e.reason || "").toLowerCase();
+      if (!retries && (reason.includes("unknown name") || reason.includes("transcription"))) {
+        transcriptionInGenerationConfig = !transcriptionInGenerationConfig;
+        retries++;
+        connect(apiKey);
+        return;
+      }
 
-      ws.onmessage = async (event) => {
-        let data = event.data;
-        if (data instanceof Blob) data = await data.text();
-        const msg = JSON.parse(data);
+      if (e.code === 1008 || reason.includes("api key") || reason.includes("permission")) {
+        setStatus("Rejected: " + (e.reason || "check the API key and model access"), "err");
+        stop();
+        return;
+      }
 
-        // 2. Play incoming 24kHz PCM audio chunks through headphones
-        const parts = msg.serverContent?.modelTurn?.parts || [];
-        for (const part of parts) {
-          if (part.inlineData && part.inlineData.data) {
-            playPcmChunk(part.inlineData.data);
-          }
-        }
-      };
+      const wait = Math.min(1000 * Math.pow(2, retries++), 8000);
+      setStatus("Disconnected (" + e.code + "). Reconnecting in " + (wait / 1000) + "s…", "warn");
+      retryTimer = setTimeout(() => { if (running) connect(apiKey); }, wait);
+    };
+  }
 
-      ws.onclose = () => stopSession();
-      ws.onerror = (err) => { console.error(err); stopSession(); };
+  // ---- playback ---------------------------------------------------------
+
+  function play(base64) {
+    if (!playCtx) return;
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length - (bin.length % 2));
+    for (let i = 0; i < bytes.length; i++) bytes[i] = bin.charCodeAt(i);
+
+    const int16 = new Int16Array(bytes.buffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+
+    const buf = playCtx.createBuffer(1, float32.length, OUT_RATE);
+    buf.getChannelData(0).set(float32);
+
+    const src = playCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(playCtx.destination);
+    src.onended = () => { liveSources = liveSources.filter(s => s !== src); };
+
+    if (playAt < playCtx.currentTime + JITTER) playAt = playCtx.currentTime + JITTER;
+    src.start(playAt);
+    playAt += buf.duration;
+    liveSources.push(src);
+  }
+
+  function flushPlayback() {
+    for (const s of liveSources) { try { s.stop(); } catch (e) {} }
+    liveSources = [];
+    if (playCtx) playAt = playCtx.currentTime;
+  }
+
+  // ---- screen wake lock -------------------------------------------------
+  // Locking the phone suspends the AudioContext and the session dies, so hold
+  // the screen awake while interpreting.
+
+  async function holdScreen() {
+    if (!("wakeLock" in navigator)) return;
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    } catch (e) { /* denied or unsupported */ }
+  }
+
+  function releaseScreen() {
+    if (wakeLock) { try { wakeLock.release(); } catch (e) {} wakeLock = null; }
+  }
+
+  document.addEventListener("visibilitychange", () => {
+    if (running && document.visibilityState === "visible" && !wakeLock) holdScreen();
+  });
+
+  // ---- teardown ---------------------------------------------------------
+
+  function stop() {
+    running = false;
+    sessionReady = false;
+    clearTimeout(retryTimer);
+    releaseScreen();
+    pending = [];
+    flushPlayback();
+
+    if (ws) {
+      ws.onclose = null;
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) ws.close();
+      ws = null;
     }
+    if (workletNode) { try { workletNode.port.onmessage = null; workletNode.disconnect(); } catch (e) {} workletNode = null; }
+    if (sink) { try { sink.disconnect(); } catch (e) {} sink = null; }
+    if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+    if (micCtx) { try { micCtx.close(); } catch (e) {} micCtx = null; }
+    if (playCtx) { try { playCtx.close(); } catch (e) {} playCtx = null; }
 
-    async function startMicCapture() {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-      
-      const source = audioCtx.createMediaStreamSource(micStream);
-      // Process 16kHz audio slices
-      const processor = audioCtx.createScriptProcessor(2048, 1, 1);
-      
-      processor.onaudioprocess = (e) => {
-        if (!isRunning || ws.readyState !== WebSocket.OPEN) return;
-        const inputData = e.inputBuffer.getChannelData(0);
-        
-        // Convert Float32Array to 16-bit signed PCM
-        const pcm16 = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          pcm16[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
-        }
+    btn.textContent = "Start listening";
+    btn.className = "";
+    btn.disabled = false;
+    if (dot.className.indexOf("err") === -1) setStatus("Stopped");
+  }
 
-        // Base64 encode PCM and push upstream
-        const base64Chunk = btoa(String.fromCharCode(...new Uint8Array(pcm16.buffer)));
-        ws.send(JSON.stringify({
-          realtimeInput: {
-            mediaChunks: [{ mimeType: "audio/pcm;rate=16000", data: base64Chunk }]
-          }
-        }));
-      };
-
-      source.connect(processor);
-      processor.connect(audioCtx.destination);
-    }
-
-    // Audio Output Playback Queue (24,000 Hz PCM)
-    let playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
-    let scheduledTime = 0;
-
-    function playPcmChunk(base64Data) {
-      const binary = atob(base64Data);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      
-      const int16 = new Int16Array(bytes.buffer);
-      const float32 = new Float32Array(int16.length);
-      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
-
-      const buffer = playCtx.createBuffer(1, float32.length, 24000);
-      buffer.getChannelData(0).set(float32);
-
-      const source = playCtx.createBufferSource();
-      source.buffer = buffer;
-      source.connect(playCtx.destination);
-
-      if (scheduledTime < playCtx.currentTime) scheduledTime = playCtx.currentTime;
-      source.start(scheduledTime);
-      scheduledTime += buffer.duration;
-    }
-
-    function stopSession() {
-      isRunning = false;
-      if (ws) ws.close();
-      if (micStream) micStream.getTracks().forEach(t => t.stop());
-      btn.textContent = "Start Listening";
-      btn.className = "start";
-      btn.disabled = false;
-      log("Status: Idle");
-    }
-  </script>
+  window.addEventListener("beforeunload", () => { if (running) stop(); });
+})();
+</script>
 </body>
 </html>
