@@ -10,7 +10,7 @@
     button { width: 95%; max-width: 400px; padding: 18px; font-size: 1.2rem; border-radius: 8px; border: none; font-weight: bold; cursor: pointer; }
     .start { background: #00e676; color: #000; }
     .stop { background: #ff5252; color: #fff; }
-    #log { margin-top: 25px; font-family: monospace; font-size: 0.95rem; white-space: pre-wrap; color: #bbb; }
+    #log { margin-top: 20px; font-family: monospace; font-size: 0.9rem; white-space: pre-wrap; color: #bbb; text-align: left; background: #1e1e1e; padding: 12px; border-radius: 6px; }
   </style>
 </head>
 <body>
@@ -18,7 +18,7 @@
   
   <input type="password" id="keyInput" placeholder="Paste Gemini API Key here" />
   <button id="toggleBtn" class="start">Start Listening</button>
-  <div id="log">Status: Enter API key to begin</div>
+  <div id="log">Status: Ready</div>
 
   <script>
     const HOST = "generativelanguage.googleapis.com";
@@ -26,19 +26,24 @@
 
     let ws = null;
     let audioCtx = null;
+    let playCtx = null;
     let micStream = null;
+    let processor = null;
     let isRunning = false;
+    let scheduledTime = 0;
+
     const btn = document.getElementById("toggleBtn");
     const logEl = document.getElementById("log");
     const keyInput = document.getElementById("keyInput");
 
-    // Pre-fill if saved previously in your phone's browser
     if (localStorage.getItem("gemini_key")) {
       keyInput.value = localStorage.getItem("gemini_key");
-      logEl.textContent = "Status: Ready";
     }
 
-    function log(msg) { logEl.textContent = msg; }
+    function log(msg) {
+      console.log(msg);
+      logEl.textContent = msg;
+    }
 
     btn.onclick = async () => {
       if (!isRunning) {
@@ -57,68 +62,94 @@
       localStorage.setItem("gemini_key", apiKey);
 
       btn.disabled = true;
-      log("Connecting to Gemini Live...");
+      log("Requesting mic permission & connecting...");
 
-      const URI = `wss://${HOST}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
-      ws = new WebSocket(URI);
+      try {
+        // Unlock Web Audio contexts on tap gesture
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+        await audioCtx.resume();
+        await playCtx.resume();
+        scheduledTime = playCtx.currentTime;
 
-      ws.onopen = () => {
-        log("Connected. Initializing interpreter...");
-        const setupMessage = {
-          setup: {
-            model: MODEL,
-            generationConfig: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } }
+        // Open mic stream
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+
+        const URI = `wss://${HOST}/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+        ws = new WebSocket(URI);
+
+        ws.onopen = () => {
+          log("Connected. Starting translation session...");
+          const setupMessage = {
+            setup: {
+              model: MODEL,
+              generationConfig: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                  voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } }
+                }
+              },
+              systemInstruction: {
+                parts: [{
+                  text: "You are a live simultaneous interpreter. " +
+                        "Translate all incoming spoken Portuguese directly into English immediately. " +
+                        "Output only the translated English audio. Never comment, reply, or add conversational filler."
+                }]
               }
-            },
-            systemInstruction: {
-              parts: [{
-                text: "You are a live simultaneous interpreter. " +
-                      "Translate all incoming spoken Portuguese directly into English immediately. " +
-                      "Output only the translated English audio. Never comment, reply, or add conversational filler."
-              }]
+            }
+          };
+          ws.send(JSON.stringify(setupMessage));
+          startMicCapture();
+          isRunning = true;
+          btn.textContent = "Stop Interpreter";
+          btn.className = "stop";
+          btn.disabled = false;
+          log("Listening to Portuguese...");
+        };
+
+        ws.onmessage = async (event) => {
+          let data = event.data;
+          if (data instanceof Blob) data = await data.text();
+          const msg = JSON.parse(data);
+
+          const parts = msg.serverContent?.modelTurn?.parts || [];
+          for (const part of parts) {
+            if (part.inlineData && part.inlineData.data) {
+              playPcmChunk(part.inlineData.data);
             }
           }
         };
-        ws.send(JSON.stringify(setupMessage));
-        startMicCapture();
-        isRunning = true;
-        btn.textContent = "Stop Interpreter";
-        btn.className = "stop";
-        btn.disabled = false;
-        log("Listening to Portuguese...");
-      };
 
-      ws.onmessage = async (event) => {
-        let data = event.data;
-        if (data instanceof Blob) data = await data.text();
-        const msg = JSON.parse(data);
+        ws.onclose = (event) => {
+          log(`Session disconnected (Code: ${event.code}, Reason: ${event.reason || "None given"})`);
+          stopSession();
+        };
 
-        const parts = msg.serverContent?.modelTurn?.parts || [];
-        for (const part of parts) {
-          if (part.inlineData && part.inlineData.data) {
-            playPcmChunk(part.inlineData.data);
-          }
-        }
-      };
+        ws.onerror = (err) => {
+          log("WebSocket connection encountered an error.");
+          stopSession();
+        };
 
-      ws.onclose = () => stopSession();
-      ws.onerror = (err) => { console.error(err); stopSession(); };
+      } catch (err) {
+        log(`Error starting session: ${err.message}`);
+        stopSession();
+      }
     }
 
-    async function startMicCapture() {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-      
+    function startMicCapture() {
       const source = audioCtx.createMediaStreamSource(micStream);
-      const processor = audioCtx.createScriptProcessor(2048, 1, 1);
-      
+      processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
       processor.onaudioprocess = (e) => {
-        if (!isRunning || ws.readyState !== WebSocket.OPEN) return;
+        if (!isRunning || !ws || ws.readyState !== WebSocket.OPEN) return;
         const inputData = e.inputBuffer.getChannelData(0);
-        
+
         const pcm16 = new Int16Array(inputData.length);
         for (let i = 0; i < inputData.length; i++) {
           pcm16[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
@@ -136,14 +167,11 @@
       processor.connect(audioCtx.destination);
     }
 
-    let playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
-    let scheduledTime = 0;
-
     function playPcmChunk(base64Data) {
       const binary = atob(base64Data);
       const bytes = new Uint8Array(binary.length);
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      
+
       const int16 = new Int16Array(bytes.buffer);
       const float32 = new Float32Array(int16.length);
       for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
@@ -162,12 +190,28 @@
 
     function stopSession() {
       isRunning = false;
-      if (ws) ws.close();
-      if (micStream) micStream.getTracks().forEach(t => t.stop());
+      if (processor) {
+        try { processor.disconnect(); } catch (e) {}
+        processor = null;
+      }
+      if (audioCtx) {
+        try { audioCtx.close(); } catch (e) {}
+        audioCtx = null;
+      }
+      if (playCtx) {
+        try { playCtx.close(); } catch (e) {}
+        playCtx = null;
+      }
+      if (micStream) {
+        micStream.getTracks().forEach(t => t.stop());
+        micStream = null;
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
       btn.textContent = "Start Listening";
       btn.className = "start";
       btn.disabled = false;
-      log("Status: Idle");
     }
   </script>
 </body>
